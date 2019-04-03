@@ -11,35 +11,38 @@ import com.bumptech.glide.util.Preconditions;
  * @param <Z> The type of data returned by the wrapped {@link Resource}.
  */
 class EngineResource<Z> implements Resource<Z> {
-  private final boolean isCacheable;
+  private final boolean isMemoryCacheable;
   private final boolean isRecyclable;
-  private ResourceListener listener;
-  private Key key;
+  private final Resource<Z> resource;
+  private final ResourceListener listener;
+  private final Key key;
+
   private int acquired;
   private boolean isRecycled;
-  private final Resource<Z> resource;
 
   interface ResourceListener {
     void onResourceReleased(Key key, EngineResource<?> resource);
   }
 
-  EngineResource(Resource<Z> toWrap, boolean isCacheable, boolean isRecyclable) {
+  EngineResource(
+      Resource<Z> toWrap,
+      boolean isMemoryCacheable,
+      boolean isRecyclable,
+      Key key,
+      ResourceListener listener) {
     resource = Preconditions.checkNotNull(toWrap);
-    this.isCacheable = isCacheable;
+    this.isMemoryCacheable = isMemoryCacheable;
     this.isRecyclable = isRecyclable;
-  }
-
-  synchronized void setResourceListener(Key key, ResourceListener listener) {
     this.key = key;
-    this.listener = listener;
+    this.listener = Preconditions.checkNotNull(listener);
   }
 
   Resource<Z> getResource() {
     return resource;
   }
 
-  boolean isCacheable() {
-    return isCacheable;
+  boolean isMemoryCacheable() {
+    return isMemoryCacheable;
   }
 
   @NonNull
@@ -97,19 +100,28 @@ class EngineResource<Z> implements Resource<Z> {
    * done with the resource. Generally external users should never call this method, the framework
    * will take care of this for you.
    */
-  synchronized void release() {
-    if (acquired <= 0) {
-      throw new IllegalStateException("Cannot release a recycled or not yet acquired resource");
-    }
-    if (--acquired == 0) {
-      listener.onResourceReleased(key, this);
+  // listener is effectively final.
+  @SuppressWarnings("SynchronizeOnNonFinalField")
+  void release() {
+    // To avoid deadlock, always acquire the listener lock before our lock so that the locking
+    // scheme is consistent (Engine -> EngineResource). Violating this order leads to deadlock
+    // (b/123646037).
+    synchronized (listener) {
+      synchronized (this) {
+        if (acquired <= 0) {
+          throw new IllegalStateException("Cannot release a recycled or not yet acquired resource");
+        }
+        if (--acquired == 0) {
+          listener.onResourceReleased(key, this);
+        }
+      }
     }
   }
 
   @Override
   public synchronized String toString() {
     return "EngineResource{"
-        + "isCacheable=" + isCacheable
+        + "isMemoryCacheable=" + isMemoryCacheable
         + ", listener=" + listener
         + ", key=" + key
         + ", acquired=" + acquired
